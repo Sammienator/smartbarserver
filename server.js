@@ -8,25 +8,38 @@ const { initSocket } = require("./src/config/socket");
 const routes = require("./src/routes");
 
 const app = express();
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || "*" }));
+
+// === FIX 1: Clean the origin (remove trailing slash) ===
+const clientOrigin = (process.env.CLIENT_ORIGIN || "")
+  .trim()
+  .replace(/\/$/, "");   // Removes trailing slash if present
+
+app.use(cors({ 
+  origin: clientOrigin || "*", 
+  credentials: true 
+}));
+
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.use("/api", routes);
 
-// Centralized error handler - anything passed to next(err) lands here.
+// Centralized error handler
 app.use((err, req, res, next) => {
   console.error("[error]", err);
   res.status(err.status || 500).json({ error: err.message || "Internal server error" });
 });
 
 const httpServer = http.createServer(app);
-initSocket(httpServer, { clientOrigin: process.env.CLIENT_ORIGIN });
+
+// === FIX 2: Pass the cleaned origin to Socket.IO ===
+initSocket(httpServer, { clientOrigin });
 
 const PORT = process.env.PORT || 4000;
 
 connectDB().then(() => {
   httpServer.listen(PORT, () => {
     console.log(`[server] Smart Bar backend listening on port ${PORT}`);
+    console.log(`[CORS] Allowed origin: ${clientOrigin || "*"}`);
   });
 });

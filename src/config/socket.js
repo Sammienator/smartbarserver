@@ -4,23 +4,28 @@ let io = null;
 
 /**
  * Rooms used:
- *  - "guests"        -> every connected guest app (all tables). Used to
- *                        broadcast live stock updates.
- *  - "admins"         -> admin dashboard clients. Used for low-stock alerts
- *                        and any other live admin metrics.
- *  - `waiter:<id>`    -> one room per waiter, so a new/ended order only
- *                        notifies the specific waiter it concerns.
- *  - `station:kitchen`, `station:bar` -> kitchen and bar prep screens.
- *                        New orders and item-ready updates for that
- *                        station's items are broadcast here.
+ *  - "guests"        → every connected guest app (all tables)
+ *  - "admins"        → admin dashboard clients
+ *  - `waiter:<id>`   → specific waiter
+ *  - `station:kitchen`, `station:bar` → kitchen and bar screens
  */
+
 function initSocket(httpServer, { clientOrigin } = {}) {
+  
+  // === CLEAN ORIGIN (Remove trailing slash if present) ===
+  const allowedOrigin = clientOrigin 
+    ? clientOrigin.trim().replace(/\/$/, "") 
+    : "*";
+
   io = new Server(httpServer, {
     cors: {
-      origin: clientOrigin || "*",
+      origin: allowedOrigin,
       methods: ["GET", "POST"],
+      credentials: true,           // Important for auth/cookies
     },
   });
+
+  console.log(`[Socket.IO] Initialized with origin: ${allowedOrigin}`);
 
   io.on("connection", (socket) => {
     console.log(`[socket] client connected: ${socket.id}`);
