@@ -9,10 +9,10 @@ const routes = require("./src/routes");
 
 const app = express();
 
-// === FIX 1: Clean the origin (remove trailing slash) ===
+// Clean client origin
 const clientOrigin = (process.env.CLIENT_ORIGIN || "")
   .trim()
-  .replace(/\/$/, "");   // Removes trailing slash if present
+  .replace(/\/$/, "");
 
 app.use(cors({ 
   origin: clientOrigin || "*", 
@@ -32,7 +32,6 @@ app.use((err, req, res, next) => {
 
 const httpServer = http.createServer(app);
 
-// === FIX 2: Pass the cleaned origin to Socket.IO ===
 initSocket(httpServer, { clientOrigin });
 
 const PORT = process.env.PORT || 4000;

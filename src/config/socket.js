@@ -12,7 +12,6 @@ let io = null;
 
 function initSocket(httpServer, { clientOrigin } = {}) {
   
-  // === CLEAN ORIGIN (Remove trailing slash if present) ===
   const allowedOrigin = clientOrigin 
     ? clientOrigin.trim().replace(/\/$/, "") 
     : "*";
@@ -21,41 +20,42 @@ function initSocket(httpServer, { clientOrigin } = {}) {
     cors: {
       origin: allowedOrigin,
       methods: ["GET", "POST"],
-      credentials: true,           // Important for auth/cookies
+      credentials: true,
     },
+    // === Crucial settings for Railway + WebSocket ===
+    transports: ["websocket", "polling"],
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    allowUpgrades: true,
+    upgradeTimeout: 30000,
   });
 
-  console.log(`[Socket.IO] Initialized with origin: ${allowedOrigin}`);
+  console.log(`[Socket.IO] Initialized with origin → ${allowedOrigin}`);
 
   io.on("connection", (socket) => {
     console.log(`[socket] client connected: ${socket.id}`);
 
-    socket.on("join:guest", () => {
-      socket.join("guests");
-    });
-
-    socket.on("join:admin", () => {
-      socket.join("admins");
-    });
+    socket.on("join:guest", () => socket.join("guests"));
+    socket.on("join:admin", () => socket.join("admins"));
 
     socket.on("join:waiter", (waiterId) => {
-      if (!waiterId) return;
-      socket.join(`waiter:${waiterId}`);
+      if (waiterId) socket.join(`waiter:${waiterId}`);
     });
 
     socket.on("leave:waiter", (waiterId) => {
-      if (!waiterId) return;
-      socket.leave(`waiter:${waiterId}`);
+      if (waiterId) socket.leave(`waiter:${waiterId}`);
     });
 
     socket.on("join:station", (station) => {
-      if (station !== "kitchen" && station !== "bar") return;
-      socket.join(`station:${station}`);
+      if (station === "kitchen" || station === "bar") {
+        socket.join(`station:${station}`);
+      }
     });
 
     socket.on("leave:station", (station) => {
-      if (station !== "kitchen" && station !== "bar") return;
-      socket.leave(`station:${station}`);
+      if (station === "kitchen" || station === "bar") {
+        socket.leave(`station:${station}`);
+      }
     });
 
     socket.on("disconnect", () => {
