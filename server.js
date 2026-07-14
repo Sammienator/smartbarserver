@@ -9,15 +9,32 @@ const routes = require("./src/routes");
 
 const app = express();
 
-// Clean client origin
-const clientOrigin = (process.env.CLIENT_ORIGIN || "")
-  .trim()
-  .replace(/\/$/, "");
+// CLIENT_ORIGIN can be a single URL or a comma-separated list, e.g.
+// "https://smartbarruaka.vercel.app,https://smartbar-staging.vercel.app"
+// Trailing slashes are stripped so a stray "/" in the env var doesn't
+// break an otherwise-correct match.
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "")
+  .split(",")
+  .map((o) => o.trim().replace(/\/$/, ""))
+  .filter(Boolean);
 
-app.use(cors({ 
-  origin: clientOrigin || "*", 
-  credentials: true 
-}));
+function isOriginAllowed(origin) {
+  if (!origin) return true; // non-browser requests (curl, server-to-server, health checks)
+  if (allowedOrigins.length === 0) return true; // nothing configured -> allow all (dev fallback)
+  return allowedOrigins.includes(origin.replace(/\/$/, ""));
+}
+
+const corsOptionsDelegate = (req, callback) => {
+  const origin = req.header("Origin");
+  if (isOriginAllowed(origin)) {
+    callback(null, { origin: origin || true, credentials: true });
+  } else {
+    console.warn(`[CORS] Rejected origin: ${origin}. Allowed: ${allowedOrigins.join(", ") || "(any - none configured)"}`);
+    callback(null, { origin: false, credentials: true });
+  }
+};
+
+app.use(cors(corsOptionsDelegate));
 
 app.use(express.json());
 
@@ -32,13 +49,13 @@ app.use((err, req, res, next) => {
 
 const httpServer = http.createServer(app);
 
-initSocket(httpServer, { clientOrigin });
+initSocket(httpServer, { clientOrigin: allowedOrigins });
 
 const PORT = process.env.PORT || 4000;
 
 connectDB().then(() => {
   httpServer.listen(PORT, () => {
     console.log(`[server] Smart Bar backend listening on port ${PORT}`);
-    console.log(`[CORS] Allowed origin: ${clientOrigin || "*"}`);
+    console.log(`[CORS] Allowed origins: ${allowedOrigins.join(", ") || "* (none configured — allowing all)"}`);
   });
 });

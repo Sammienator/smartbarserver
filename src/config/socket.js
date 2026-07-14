@@ -11,14 +11,27 @@ let io = null;
  */
 
 function initSocket(httpServer, { clientOrigin } = {}) {
-  
-  const allowedOrigin = clientOrigin 
-    ? clientOrigin.trim().replace(/\/$/, "") 
-    : "*";
+
+  // clientOrigin may be a single string (legacy) or an array of allowed
+  // origins. Normalize to an array, trimming trailing slashes.
+  const allowedOrigins = (Array.isArray(clientOrigin) ? clientOrigin : [clientOrigin])
+    .filter(Boolean)
+    .map((o) => o.trim().replace(/\/$/, ""));
+
+  const corsOrigin = allowedOrigins.length === 0
+    ? "*"
+    : (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+          callback(null, true);
+        } else {
+          console.warn(`[Socket.IO CORS] Rejected origin: ${origin}`);
+          callback(null, false);
+        }
+      };
 
   io = new Server(httpServer, {
     cors: {
-      origin: allowedOrigin,
+      origin: corsOrigin,
       methods: ["GET", "POST"],
       credentials: true,
     },
@@ -30,7 +43,7 @@ function initSocket(httpServer, { clientOrigin } = {}) {
     upgradeTimeout: 30000,
   });
 
-  console.log(`[Socket.IO] Initialized with origin → ${allowedOrigin}`);
+  console.log(`[Socket.IO] Initialized with allowed origins → ${allowedOrigins.join(", ") || "* (any)"}`);
 
   io.on("connection", (socket) => {
     console.log(`[socket] client connected: ${socket.id}`);
