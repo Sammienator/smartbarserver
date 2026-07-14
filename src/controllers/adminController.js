@@ -146,6 +146,7 @@ async function orderHistory(req, res) {
       tableNumber: o.tableNumber,
       items: o.items.map((i) => ({
         name: i.name,
+        price: i.price,
         quantity: i.quantity,
         category: i.category,
         prepared: i.prepared,
