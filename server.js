@@ -44,6 +44,15 @@ app.use("/api", routes);
 // Centralized error handler
 app.use((err, req, res, next) => {
   console.error("[error]", err);
+  // Multer errors (bad field name, file too large, etc.) come through here
+  // too - give them a clearer message than a raw stack trace.
+  if (err.name === "MulterError") {
+    const message =
+      err.code === "LIMIT_FILE_SIZE"
+        ? "Image is too large (max 5MB)"
+        : err.message;
+    return res.status(400).json({ error: message });
+  }
   res.status(err.status || 500).json({ error: err.message || "Internal server error" });
 });
 

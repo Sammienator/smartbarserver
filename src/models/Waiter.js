@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const waiterSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
+    imageUrl: { type: String, default: "" },
     // No authentication/login is used for waiters (per current requirements).
     // A waiter's device simply operates as this identity - selected once at
     // the start of a shift, with no password involved.
