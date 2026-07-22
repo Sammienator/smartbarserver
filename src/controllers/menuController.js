@@ -10,7 +10,7 @@ async function listMenuItems(req, res) {
 
 // POST /api/menu   (admin)
 async function createMenuItem(req, res) {
-  const { name, category, price, imageUrl, stockQty } = req.body;
+  const { name, category, price, imageUrl, stockQty, description } = req.body;
   if (!name || !category || price == null) {
     return res.status(400).json({ error: "name, category, and price are required" });
   }
@@ -20,18 +20,27 @@ async function createMenuItem(req, res) {
     price,
     imageUrl: imageUrl || "",
     stockQty: stockQty ?? 0,
+    description: description || "",
   });
   return res.status(201).json(item);
 }
 
-// PATCH /api/menu/:id   (admin) - edit name/price/image/category
+// PATCH /api/menu/:id   (admin) - edit name/price/image/category/description
 async function updateMenuItem(req, res) {
   const { id } = req.params;
-  const { name, category, price, imageUrl } = req.body;
+  const { name, category, price, imageUrl, description } = req.body;
 
   const item = await MenuItem.findByIdAndUpdate(
     id,
-    { $set: { ...(name && { name }), ...(category && { category }), ...(price != null && { price }), ...(imageUrl != null && { imageUrl }) } },
+    {
+      $set: {
+        ...(name && { name }),
+        ...(category && { category }),
+        ...(price != null && { price }),
+        ...(imageUrl != null && { imageUrl }),
+        ...(description != null && { description }),
+      },
+    },
     { new: true }
   );
 

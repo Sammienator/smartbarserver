@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const menuItemSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
+    description: { type: String, default: "", trim: true, maxlength: 280 },
     category: {
       type: String,
       enum: ["drink", "food"],
