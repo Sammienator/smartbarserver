@@ -6,6 +6,8 @@ const http = require("http");
 const connectDB = require("./src/config/db");
 const { initSocket } = require("./src/config/socket");
 const routes = require("./src/routes");
+const { paystackWebhook } = require("./src/controllers/paymentController");
+const asyncHandler = require("./src/utils/asyncHandler");
 
 const app = express();
 
@@ -36,6 +38,14 @@ const corsOptionsDelegate = (req, callback) => {
 
 app.use(cors(corsOptionsDelegate));
 
+// Paystack webhook needs the RAW body for HMAC signature verification.
+// Mount it BEFORE express.json().
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  asyncHandler(paystackWebhook)
+);
+
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
@@ -44,8 +54,6 @@ app.use("/api", routes);
 // Centralized error handler
 app.use((err, req, res, next) => {
   console.error("[error]", err);
-  // Multer errors (bad field name, file too large, etc.) come through here
-  // too - give them a clearer message than a raw stack trace.
   if (err.name === "MulterError") {
     const message =
       err.code === "LIMIT_FILE_SIZE"

@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 router.use("/orders", require("./orderRoutes"));
+router.use("/payments", require("./paymentRoutes"));
 router.use("/menu", require("./menuRoutes"));
 router.use("/waiters", require("./waiterRoutes"));
 router.use("/tables", require("./tableRoutes"));
