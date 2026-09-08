@@ -8,6 +8,7 @@ const { initSocket } = require("./src/config/socket");
 const routes = require("./src/routes");
 const { paystackWebhook } = require("./src/controllers/paymentController");
 const asyncHandler = require("./src/utils/asyncHandler");
+const paymentRoutes = require("./src/routes/paymentRoutes");
 
 const app = express();
 
@@ -50,6 +51,7 @@ app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.use("/api", routes);
+app.use("/api/payments", paymentRoutes);
 
 // Centralized error handler
 app.use((err, req, res, next) => {
