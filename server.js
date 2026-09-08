@@ -51,7 +51,7 @@ app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.use("/api", routes);
-app.use("/api/payments", paymentRoutes);
+app.use("/payments", paymentRoutes);
 
 // Centralized error handler
 app.use((err, req, res, next) => {
