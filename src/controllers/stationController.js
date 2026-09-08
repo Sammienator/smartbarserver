@@ -1,6 +1,8 @@
 const Order = require("../models/Order");
 const { getIO } = require("../config/socket");
-const { CATEGORY_TO_STATION } = require("./orderController");
+
+// Define category to station mapping locally
+const CATEGORY_TO_STATION = { food: "kitchen", drink: "bar" };
 
 const STATION_TO_CATEGORY = Object.fromEntries(
   Object.entries(CATEGORY_TO_STATION).map(([category, station]) => [station, category])
@@ -32,6 +34,7 @@ async function getStationOrders(req, res) {
     .map((o) => ({
       orderId: o._id,
       tableNumber: o.tableNumber,
+      pin: o.pin,
       createdAt: o.createdAt,
       items: o.items
         .filter((i) => i.category === category)
@@ -72,13 +75,22 @@ async function markItemReady(req, res) {
 
   item.prepared = true;
   item.preparedAt = new Date();
+  
   // See the same fix/comment in orderController.endOrder - avoids
   // re-validating every item on the order (including ones from before
   // the `category` field existed) just because one item's prep status changed.
   await order.save({ validateModifiedOnly: true });
 
   const io = getIO();
-  io.to(`station:${station}`).emit("station:itemReady", { orderId: order._id, itemId: item._id, station });
+  
+  // Notify station
+  io.to(`station:${station}`).emit("station:itemReady", { 
+    orderId: order._id, 
+    itemId: item._id, 
+    station 
+  });
+
+  // Notify waiter
   io.to(`waiter:${order.assignedWaiter}`).emit("item:ready", {
     orderId: order._id,
     itemId: item._id,
@@ -86,11 +98,13 @@ async function markItemReady(req, res) {
     station,
   });
 
+  // Check if all items are ready
   const allReady = order.items.every((i) => i.prepared);
   if (allReady) {
     io.to(`waiter:${order.assignedWaiter}`).emit("order:ready", {
       orderId: order._id,
       tableNumber: order.tableNumber,
+      pin: order.pin,
     });
   }
 
