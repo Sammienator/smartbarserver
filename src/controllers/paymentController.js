@@ -67,6 +67,7 @@ async function initiatePayment(req, res) {
 
 /**
  * M-Pesa Payment via Daraja API
+ * Supports both Till Number and PayBill
  */
 async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amount, category, table }) {
   try {
@@ -74,10 +75,11 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
     const consumerKey = process.env.DARAJA_CONSUMER_KEY;
     const consumerSecret = process.env.DARAJA_CONSUMER_SECRET;
     const passKey = process.env.DARAJA_PASS_KEY;
-    const businessShortCode = process.env.DARAJA_BUSINESS_CODE;
+    const shortCode = process.env.DARAJA_BUSINESS_CODE || process.env.DARAJA_SHORTCODE;
+    const tillNumber = process.env.DARAJA_TILL_NUMBER; // Optional: if present, use till mode
     const callbackUrl = process.env.DARAJA_CALLBACK_URL;
 
-    if (!consumerKey || !consumerSecret || !businessShortCode) {
+    if (!consumerKey || !consumerSecret || !shortCode) {
       return res.status(500).json({ error: "Daraja credentials not configured" });
     }
 
@@ -100,31 +102,51 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
       .toISOString()
       .replace(/[^0-9]/g, "")
       .slice(0, -3);
-    const password = Buffer.from(`${businessShortCode}${passKey}${timestamp}`).toString("base64");
+    const password = Buffer.from(`${shortCode}${passKey}${timestamp}`).toString("base64");
+
+    // Format phone number to 254 format
+    const formattedPhone = formatPhoneNumber(phone);
 
     const payment = await Payment.create({
       reference,
       tableNumber,
-      phone,
-      amount,
+      phone: formattedPhone,
+      amount: Math.floor(amount),
       paymentMethod: "mpesa",
       items,
       category,
       status: "pending",
     });
 
-    // Step 3: Initiate STK push to phone
+    // Step 3: Determine transaction type based on till availability
+    const usesTillNumber = !!tillNumber;
+    const transactionType = usesTillNumber 
+      ? "CustomerBuyGoodsOnline" 
+      : "CustomerPayBillOnline";
+    const partyB = usesTillNumber ? tillNumber : shortCode;
+
+    console.log(
+      `[daraja] Initiating ${usesTillNumber ? "Till Number" : "PayBill"} payment:`,
+      {
+        phone: formattedPhone,
+        amount: Math.floor(amount),
+        transactionType,
+        partyB,
+      }
+    );
+
+    // Step 4: Initiate STK push to phone
     const darajaResponse = await axios.post(
       "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
       {
-        BusinessShortCode: businessShortCode,
+        BusinessShortCode: shortCode,
         Password: password,
         Timestamp: timestamp,
-        TransactionType: "CustomerPayBillOnline",
+        TransactionType: transactionType,
         Amount: Math.floor(amount),
-        PartyA: phone,
-        PartyB: businessShortCode,
-        PhoneNumber: phone,
+        PartyA: formattedPhone,
+        PartyB: partyB, // Till number or short code
+        PhoneNumber: formattedPhone,
         CallBackURL: callbackUrl,
         AccountReference: `Table-${tableNumber}`,
         TransactionDesc: `Smart Bar - Table ${tableNumber}`,
@@ -136,17 +158,33 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
       }
     );
 
-    console.log("[daraja] STK push initiated for phone:", phone);
+    console.log("[daraja] STK push initiated for phone:", formattedPhone);
 
     return res.json({
       success: true,
       paymentId: payment._id,
       message: "Enter your M-Pesa PIN on your phone to complete payment",
+      transactionType: usesTillNumber ? "till" : "paybill",
     });
   } catch (err) {
     console.error("[daraja] Error:", err.response?.data || err.message);
     return res.status(500).json({ error: "Failed to initiate M-Pesa payment" });
   }
+}
+
+/**
+ * Format phone to 254 format
+ */
+function formatPhoneNumber(phone) {
+  let digits = phone.toString().replace(/\D/g, "");
+  if (digits.startsWith("0")) {
+    digits = "254" + digits.slice(1);
+  } else if (digits.length === 9 && digits.startsWith("7")) {
+    digits = "254" + digits;
+  } else if (!digits.startsWith("254")) {
+    digits = "254" + digits;
+  }
+  return digits;
 }
 
 /**
@@ -168,7 +206,7 @@ async function initiatePaystackPayment(req, res, { tableNumber, items, email, am
       reference,
       tableNumber,
       email,
-      amount,
+      amount: Math.floor(amount),
       paymentMethod: "card",
       items,
       category,
