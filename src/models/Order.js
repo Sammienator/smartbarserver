@@ -10,6 +10,7 @@ const orderSchema = new mongoose.Schema(
     tableNumber: {
       type: Number,
       required: true,
+      index: true,
     },
     items: [
       {
@@ -43,17 +44,27 @@ const orderSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
-    email: {
-      type: String,
-      required: true,
-      lowercase: true,
-      trim: true,
-    },
+    // Payment info
     paymentMethod: {
       type: String,
       enum: ["mpesa", "card"],
       required: true,
     },
+    phone: {
+      type: String,
+      sparse: true,
+    },
+    email: {
+      type: String,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+    },
+    paymentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Payment",
+    },
+    // Order status
     assignedWaiter: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Waiter",
@@ -64,15 +75,6 @@ const orderSchema = new mongoose.Schema(
       enum: ["active", "completed", "cancelled"],
       default: "active",
       index: true,
-    },
-    paymentReference: {
-      type: String,
-      index: true,
-    },
-    paymentStatus: {
-      type: String,
-      enum: ["pending", "completed", "failed"],
-      default: "pending",
     },
   },
   {
