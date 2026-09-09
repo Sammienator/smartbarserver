@@ -8,18 +8,14 @@ const { getIO } = require("../config/socket");
 const { emitStockUpdate } = require("../utils/stockEvents");
 const axios = require("axios");
 
-// Determine if using sandbox or live
-const USE_SANDBOX = process.env.DARAJA_MODE === "sandbox" || process.env.NODE_ENV !== "production";
-const DARAJA_BASE_URL = USE_SANDBOX
-  ? "https://sandbox.safaricom.co.ke"
-  : "https://api.safaricom.co.ke";
-
-console.log(`[daraja] Mode: ${USE_SANDBOX ? "SANDBOX" : "LIVE"} - ${DARAJA_BASE_URL}`);
+// ============================================================
+// PRODUCTION ONLY – no sandbox logic
+// ============================================================
+const DARAJA_BASE_URL = "https://api.safaricom.co.ke";
 
 /**
  * POST /api/payments/initiate
- * Initiates payment via Daraja (M-Pesa) or Paystack (Card)
- * Order is NOT created yet - only after payment succeeds
+ * Body: { tableNumber, items, paymentMethod: "mpesa"|"card", phone?, email?, amount, category }
  */
 async function initiatePayment(req, res) {
   const { tableNumber, items, paymentMethod, phone, email, amount, category } = req.body;
@@ -32,14 +28,16 @@ async function initiatePayment(req, res) {
     return res.status(400).json({ error: "Payment method must be 'mpesa' or 'card'" });
   }
 
-  // M-Pesa requires phone
   if (paymentMethod === "mpesa" && !phone) {
     return res.status(400).json({ error: "Phone number required for M-Pesa" });
   }
 
-  // Card requires email
   if (paymentMethod === "card" && !email) {
     return res.status(400).json({ error: "Email required for card payment" });
+  }
+
+  if (!amount || amount < 1) {
+    return res.status(400).json({ error: "Valid amount is required" });
   }
 
   const table = await Table.findOne({ tableNumber, isActive: true });
@@ -57,16 +55,17 @@ async function initiatePayment(req, res) {
         category,
         table,
       });
-    } else if (paymentMethod === "card") {
-      return await initiatePaystackPayment(req, res, {
-        tableNumber,
-        items,
-        email,
-        amount,
-        category,
-        table,
-      });
     }
+
+    // Card – currently using Paystack
+    return await initiatePaystackPayment(req, res, {
+      tableNumber,
+      items,
+      email,
+      amount,
+      category,
+      table,
+    });
   } catch (err) {
     console.error("[payment] Error initiating payment:", err);
     return res.status(500).json({ error: "Payment initiation failed" });
@@ -74,100 +73,97 @@ async function initiatePayment(req, res) {
 }
 
 /**
- * M-Pesa Payment via Daraja API
- * Supports both Sandbox and Live modes
+ * M-Pesa STK Push via Daraja (PRODUCTION)
+ * Uses Till Number (CustomerBuyGoodsOnline)
  */
-async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amount, category, table }) {
+async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amount, category }) {
   try {
-    // Get Daraja credentials from environment
     const consumerKey = process.env.DARAJA_CONSUMER_KEY;
     const consumerSecret = process.env.DARAJA_CONSUMER_SECRET;
     const passKey = process.env.DARAJA_PASS_KEY;
-    const shortCode = process.env.DARAJA_BUSINESS_CODE || process.env.DARAJA_SHORTCODE;
-    const tillNumber = process.env.DARAJA_TILL_NUMBER;
+    const shortCode = process.env.DARAJA_BUSINESS_CODE; // Store Number / Business Shortcode
+    const tillNumber = process.env.DARAJA_TILL_NUMBER;   // Till Number
     const callbackUrl = process.env.DARAJA_CALLBACK_URL;
 
-    if (!consumerKey || !consumerSecret || !shortCode) {
-      return res.status(500).json({ error: "Daraja credentials not configured" });
+    // Validate required credentials
+    const missing = [];
+    if (!consumerKey) missing.push("DARAJA_CONSUMER_KEY");
+    if (!consumerSecret) missing.push("DARAJA_CONSUMER_SECRET");
+    if (!passKey) missing.push("DARAJA_PASS_KEY");
+    if (!shortCode) missing.push("DARAJA_BUSINESS_CODE");
+    if (!tillNumber) missing.push("DARAJA_TILL_NUMBER");
+    if (!callbackUrl) missing.push("DARAJA_CALLBACK_URL");
+
+    if (missing.length > 0) {
+      console.error("[daraja] Missing env vars:", missing.join(", "));
+      return res.status(500).json({
+        error: "Daraja credentials not fully configured",
+        missing,
+      });
     }
 
-    // Step 1: Get Daraja access token
+    // ---------- 1. Get Access Token ----------
     const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
-    
-    console.log(`[daraja] Getting access token from: ${DARAJA_BASE_URL}/oauth/v1/generate`);
-    
+
+    console.log(`[daraja] Requesting access token → ${DARAJA_BASE_URL}`);
+
     const tokenResponse = await axios.get(
       `${DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
       {
-        headers: {
-          Authorization: `Basic ${auth}`,
-        },
-        timeout: 10000,
+        headers: { Authorization: `Basic ${auth}` },
+        timeout: 12000,
       }
     );
 
-    const accessToken = tokenResponse.data.access_token;
-
+    const accessToken = tokenResponse.data?.access_token;
     if (!accessToken) {
+      console.error("[daraja] Token response:", tokenResponse.data);
       throw new Error("No access token received from Daraja");
     }
 
-    console.log("[daraja] ✓ Access token obtained successfully");
+    console.log("[daraja] ✓ Access token obtained");
 
-    // Step 2: Create payment record in database (order NOT created yet)
+    // ---------- 2. Create pending Payment record ----------
     const reference = `MPESA-${tableNumber}-${Date.now()}`;
     const timestamp = new Date()
       .toISOString()
       .replace(/[^0-9]/g, "")
-      .slice(0, -3);
-    const password = Buffer.from(`${shortCode}${passKey}${timestamp}`).toString("base64");
+      .slice(0, 14); // YYYYMMDDHHmmss
 
-    // Format phone number to 254 format
+    // Password = Base64(Shortcode + Passkey + Timestamp)
+    const password = Buffer.from(`${shortCode}${passKey}${timestamp}`).toString("base64");
     const formattedPhone = formatPhoneNumber(phone);
 
     const payment = await Payment.create({
       reference,
       tableNumber,
       phone: formattedPhone,
-      amount: Math.floor(amount),
+      amount: Math.floor(Number(amount)),
       paymentMethod: "mpesa",
       items,
       category,
       status: "pending",
     });
 
-    // Step 3: Determine transaction type based on till availability
-    const usesTillNumber = !!tillNumber;
-    const transactionType = usesTillNumber 
-      ? "CustomerBuyGoodsOnline" 
-      : "CustomerPayBillOnline";
-    const partyB = usesTillNumber ? tillNumber : shortCode;
+    // ---------- 3. STK Push (Till Number) ----------
+    console.log("[daraja] Initiating Till Number STK Push:", {
+      phone: formattedPhone,
+      amount: Math.floor(Number(amount)),
+      BusinessShortCode: shortCode,
+      PartyB: tillNumber,
+      TransactionType: "CustomerBuyGoodsOnline",
+    });
 
-    console.log(
-      `[daraja] Initiating ${usesTillNumber ? "Till Number" : "PayBill"} payment (${USE_SANDBOX ? "SANDBOX" : "LIVE"}):`,
+    const stkResponse = await axios.post(
+      `${DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
       {
-        phone: formattedPhone,
-        amount: Math.floor(amount),
-        transactionType,
-        partyB,
-      }
-    );
-
-    // Step 4: Initiate STK push to phone
-    const stkPushUrl = `${DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`;
-    
-    console.log(`[daraja] Sending to: ${stkPushUrl}`);
-
-    const darajaResponse = await axios.post(
-      stkPushUrl,
-      {
-        BusinessShortCode: shortCode,
+        BusinessShortCode: shortCode,                 // 4346509
         Password: password,
         Timestamp: timestamp,
-        TransactionType: transactionType,
-        Amount: Math.floor(amount),
+        TransactionType: "CustomerBuyGoodsOnline",
+        Amount: Math.floor(Number(amount)),
         PartyA: formattedPhone,
-        PartyB: partyB,
+        PartyB: tillNumber,                           // 3435327
         PhoneNumber: formattedPhone,
         CallBackURL: callbackUrl,
         AccountReference: `Table-${tableNumber}`,
@@ -176,45 +172,75 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
         },
-        timeout: 15000,
+        timeout: 20000,
       }
     );
 
-    console.log("[daraja] ✓ STK push initiated successfully");
+    console.log("[daraja] ✓ STK Push accepted:", {
+      MerchantRequestID: stkResponse.data.MerchantRequestID,
+      CheckoutRequestID: stkResponse.data.CheckoutRequestID,
+      ResponseCode: stkResponse.data.ResponseCode,
+      ResponseDescription: stkResponse.data.ResponseDescription,
+    });
+
+    // Store the IDs so the callback can find this payment
+    payment.merchantRequestID = stkResponse.data.MerchantRequestID;
+    payment.checkoutRequestID = stkResponse.data.CheckoutRequestID;
+    await payment.save();
 
     return res.json({
       success: true,
       paymentId: payment._id,
+      checkoutRequestID: stkResponse.data.CheckoutRequestID,
       message: "Enter your M-Pesa PIN on your phone to complete payment",
-      transactionType: usesTillNumber ? "till" : "paybill",
-      mode: USE_SANDBOX ? "sandbox" : "live",
+      mode: "live",
     });
   } catch (err) {
-    console.error("[daraja] Error:", err.response?.data || err.message);
-    return res.status(500).json({ error: err.response?.data?.errorMessage || "Failed to initiate M-Pesa payment" });
+    const darajaError = err.response?.data;
+    console.error("[daraja] Error:", darajaError || err.message);
+
+    // Helpful error messages for common production issues
+    let userMessage = "Failed to initiate M-Pesa payment";
+    if (darajaError?.errorCode === "404.001.03") {
+      userMessage =
+        "Invalid Access Token. Check that you are using LIVE Consumer Key/Secret/Passkey and that Lipa Na M-Pesa Online is activated on shortcode 4346509.";
+    } else if (darajaError?.errorMessage) {
+      userMessage = darajaError.errorMessage;
+    }
+
+    return res.status(500).json({
+      error: userMessage,
+      code: darajaError?.errorCode || null,
+      details: darajaError || null,
+    });
   }
 }
 
 /**
- * Format phone to 254 format
+ * Format any Kenyan phone number to 2547XXXXXXXX
  */
 function formatPhoneNumber(phone) {
-  let digits = phone.toString().replace(/\D/g, "");
+  let digits = String(phone).replace(/\D/g, "");
+
   if (digits.startsWith("0")) {
     digits = "254" + digits.slice(1);
   } else if (digits.length === 9 && digits.startsWith("7")) {
     digits = "254" + digits;
+  } else if (digits.startsWith("+254")) {
+    digits = digits.slice(1);
   } else if (!digits.startsWith("254")) {
     digits = "254" + digits;
   }
+
   return digits;
 }
 
 /**
- * Card Payment via Paystack
+ * Card payments via Paystack (kept for future use)
  */
-async function initiatePaystackPayment(req, res, { tableNumber, items, email, amount, category, table }) {
+async function initiatePaystackPayment(req, res, { tableNumber, items, email, amount, category }) {
   try {
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
     const callbackUrl = process.env.PAYSTACK_CALLBACK_URL;
@@ -223,26 +249,24 @@ async function initiatePaystackPayment(req, res, { tableNumber, items, email, am
       return res.status(500).json({ error: "Paystack key not configured" });
     }
 
-    // Step 1: Create payment record (order NOT created yet)
     const reference = `CARD-${tableNumber}-${Date.now()}`;
 
     const payment = await Payment.create({
       reference,
       tableNumber,
       email,
-      amount: Math.floor(amount),
+      amount: Math.floor(Number(amount)),
       paymentMethod: "card",
       items,
       category,
       status: "pending",
     });
 
-    // Step 2: Initialize Paystack transaction
     const paystackResponse = await axios.post(
       "https://api.paystack.co/transaction/initialize",
       {
         email,
-        amount: Math.floor(amount * 100), // Paystack wants amount in cents
+        amount: Math.floor(Number(amount) * 100), // kobo
         reference,
         metadata: {
           tableNumber,
@@ -252,16 +276,11 @@ async function initiatePaystackPayment(req, res, { tableNumber, items, email, am
         callback_url: callbackUrl,
       },
       {
-        headers: {
-          Authorization: `Bearer ${paystackKey}`,
-        },
-        timeout: 10000,
+        headers: { Authorization: `Bearer ${paystackKey}` },
+        timeout: 12000,
       }
     );
 
-    console.log("[paystack] Transaction initialized for email:", email);
-
-    // Return payment URL for redirect
     return res.json({
       success: true,
       paymentId: payment._id,
@@ -274,62 +293,100 @@ async function initiatePaystackPayment(req, res, { tableNumber, items, email, am
 }
 
 /**
- * Daraja Callback Handler
  * POST /api/payments/daraja-callback
- * Called by Daraja when payment status changes
+ * Safaricom calls this after the customer enters PIN
  */
 async function darajaCallback(req, res) {
-  const { Body } = req.body;
+  // Always acknowledge quickly so Daraja does not retry excessively
+  res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
 
   try {
-    const stkCallback = Body.stkCallback;
-    const reference = stkCallback.CheckoutRequestID;
-    const resultCode = stkCallback.ResultCode;
+    const body = req.body?.Body || req.body;
+    const stkCallback = body?.stkCallback;
 
-    console.log("[daraja-callback] Received callback:", { reference, resultCode });
-
-    // Find payment record
-    const payment = await Payment.findOne({ reference });
-    if (!payment) {
-      console.error("[daraja-callback] Payment not found:", reference);
-      return res.status(404).json({ error: "Payment record not found" });
+    if (!stkCallback) {
+      console.error("[daraja-callback] Invalid payload:", JSON.stringify(req.body));
+      return;
     }
 
-    if (resultCode === 0) {
-      // ✓ Payment successful
+    const {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+      CallbackMetadata,
+    } = stkCallback;
+
+    console.log("[daraja-callback] Received:", {
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+    });
+
+    // Find payment by CheckoutRequestID (most reliable) or fallback
+    let payment = await Payment.findOne({ checkoutRequestID: CheckoutRequestID });
+
+    if (!payment) {
+      payment = await Payment.findOne({ merchantRequestID: MerchantRequestID });
+    }
+
+    if (!payment) {
+      console.error("[daraja-callback] Payment not found for:", {
+        CheckoutRequestID,
+        MerchantRequestID,
+      });
+      return;
+    }
+
+    // Already processed?
+    if (payment.status !== "pending") {
+      console.log("[daraja-callback] Payment already processed:", payment.status);
+      return;
+    }
+
+    if (ResultCode === 0) {
+      // ---------- SUCCESS ----------
+      const meta = {};
+      if (CallbackMetadata?.Item) {
+        for (const item of CallbackMetadata.Item) {
+          meta[item.Name] = item.Value;
+        }
+      }
+
       payment.status = "completed";
-      payment.transactionId = stkCallback.MerchantRequestID;
+      payment.transactionId = meta.MpesaReceiptNumber || MerchantRequestID;
+      payment.mpesaReceiptNumber = meta.MpesaReceiptNumber || null;
+      payment.transactionData = {
+        amount: meta.Amount,
+        mpesaReceiptNumber: meta.MpesaReceiptNumber,
+        transactionDate: meta.TransactionDate,
+        phoneNumber: meta.PhoneNumber,
+        raw: stkCallback,
+      };
       await payment.save();
 
-      console.log("[daraja] Payment SUCCESSFUL - Creating order now");
+      console.log("[daraja] ✓ Payment SUCCESSFUL – creating order");
 
-      // NOW create the order
       const order = await createOrderAfterPayment(payment);
-
-      if (order) {
-        return res.json({ success: true, orderId: order._id, pin: order.pin });
-      } else {
-        return res.status(500).json({ error: "Order creation failed" });
+      if (!order) {
+        console.error("[daraja] Order creation failed after successful payment");
       }
     } else {
-      // ✗ Payment failed
+      // ---------- FAILED / CANCELLED ----------
       payment.status = "failed";
-      payment.failureReason = stkCallback.ResultDesc;
+      payment.failureReason = ResultDesc || `ResultCode ${ResultCode}`;
+      payment.transactionData = stkCallback;
       await payment.save();
 
-      console.log("[daraja] Payment FAILED:", stkCallback.ResultDesc);
-      return res.json({ success: false, error: stkCallback.ResultDesc });
+      console.log("[daraja] Payment FAILED:", ResultDesc);
     }
   } catch (err) {
-    console.error("[daraja-callback] Error:", err);
-    return res.status(500).json({ error: "Callback processing failed" });
+    console.error("[daraja-callback] Unexpected error:", err);
   }
 }
 
 /**
- * Paystack Callback Handler
- * GET /api/payments/paystack-callback?reference=xxx
- * Called after Paystack redirects user back
+ * GET /api/payments/paystack-callback
  */
 async function paystackCallback(req, res) {
   const { reference } = req.query;
@@ -341,58 +398,41 @@ async function paystackCallback(req, res) {
   try {
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
 
-    // Step 1: Verify payment with Paystack
     const verifyResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
-        headers: {
-          Authorization: `Bearer ${paystackKey}`,
-        },
-        timeout: 10000,
+        headers: { Authorization: `Bearer ${paystackKey}` },
+        timeout: 12000,
       }
     );
 
     const paymentData = verifyResponse.data.data;
     const status = paymentData.status;
 
-    console.log("[paystack-callback] Verified payment:", { reference, status });
-
-    // Step 2: Find payment record
     const payment = await Payment.findOne({ reference });
     if (!payment) {
-      console.error("[paystack-callback] Payment not found:", reference);
       return res.redirect("/payment-failed?error=payment_not_found");
     }
 
     if (status === "success") {
-      // ✓ Payment successful
       payment.status = "completed";
       payment.transactionId = paymentData.reference;
       payment.transactionData = paymentData;
       await payment.save();
 
-      console.log("[paystack] Payment SUCCESSFUL - Creating order now");
-
-      // NOW create the order
       const order = await createOrderAfterPayment(payment);
-
       if (order) {
-        // Redirect to success page with order PIN
         return res.redirect(
           `/payment-success?status=success&orderId=${order._id}&pin=${order.pin}`
         );
-      } else {
-        return res.redirect("/payment-failed?error=order_creation_failed");
       }
-    } else {
-      // ✗ Payment failed
-      payment.status = "failed";
-      payment.failureReason = paymentData.gateway_response;
-      await payment.save();
-
-      console.log("[paystack] Payment FAILED:", paymentData.gateway_response);
-      return res.redirect(`/payment-failed?status=failed&reference=${reference}`);
+      return res.redirect("/payment-failed?error=order_creation_failed");
     }
+
+    payment.status = "failed";
+    payment.failureReason = paymentData.gateway_response;
+    await payment.save();
+    return res.redirect(`/payment-failed?status=failed&reference=${reference}`);
   } catch (err) {
     console.error("[paystack-callback] Error:", err);
     return res.redirect("/payment-failed?error=verification_failed");
@@ -400,8 +440,7 @@ async function paystackCallback(req, res) {
 }
 
 /**
- * Create Order After Payment Succeeds
- * This is where the PIN is generated and order is pushed to kitchen/bar
+ * Create the actual Order only after payment succeeds
  */
 async function createOrderAfterPayment(payment) {
   const { tableNumber, items: paymentItems, category } = payment;
@@ -413,7 +452,6 @@ async function createOrderAfterPayment(payment) {
       return null;
     }
 
-    // Step 1: Decrement stock for all items
     const decremented = [];
     const orderItems = [];
     let totalAmount = 0;
@@ -427,7 +465,9 @@ async function createOrderAfterPayment(payment) {
 
       if (!updated) {
         const existing = await MenuItem.findById(menuItemId);
-        throw new Error(`Not enough stock for "${existing ? existing.name : menuItemId}"`);
+        throw new Error(
+          `Not enough stock for "${existing ? existing.name : menuItemId}"`
+        );
       }
 
       decremented.push({ menuItemId, quantity });
@@ -442,7 +482,6 @@ async function createOrderAfterPayment(payment) {
       emitStockUpdate(updated);
     }
 
-    // Step 2: Assign waiter
     const waiter = await assignWaiter({ zone: table.zone });
     if (!waiter) {
       await rollbackStock(decremented);
@@ -450,7 +489,6 @@ async function createOrderAfterPayment(payment) {
       return null;
     }
 
-    // Step 3: Generate PIN and create order
     const pin = await generateUniquePin();
 
     const order = await Order.create({
@@ -467,14 +505,17 @@ async function createOrderAfterPayment(payment) {
       status: "active",
     });
 
-    console.log("[order-creation] ✓ Order created:", { orderId: order._id, pin, tableNumber });
+    console.log("[order-creation] ✓ Order created:", {
+      orderId: order._id,
+      pin,
+      tableNumber,
+    });
 
-    // Step 4: Update payment with order reference
     payment.orderId = order._id;
     payment.pin = pin;
     await payment.save();
 
-    // Step 5: Notify waiter in real time
+    // Real-time notifications
     const io = getIO();
     io.to(`waiter:${waiter._id}`).emit("order:new", {
       orderId: order._id,
@@ -486,7 +527,6 @@ async function createOrderAfterPayment(payment) {
       createdAt: order.createdAt,
     });
 
-    // Step 6: Notify kitchen/bar stations
     notifyStations(order);
 
     return order;
@@ -496,15 +536,14 @@ async function createOrderAfterPayment(payment) {
   }
 }
 
-/**
- * Notify kitchen and/or bar about new order
- */
 function notifyStations(order) {
   const io = getIO();
   const CATEGORY_TO_STATION = { food: "kitchen", drink: "bar" };
 
   for (const station of new Set(Object.values(CATEGORY_TO_STATION))) {
-    const category = Object.keys(CATEGORY_TO_STATION).find((c) => CATEGORY_TO_STATION[c] === station);
+    const category = Object.keys(CATEGORY_TO_STATION).find(
+      (c) => CATEGORY_TO_STATION[c] === station
+    );
     const stationItems = order.items.filter((i) => i.category === category);
     if (stationItems.length === 0) continue;
 
@@ -525,13 +564,15 @@ function notifyStations(order) {
 
 async function rollbackStock(items) {
   for (const { menuItemId, quantity } of items) {
-    await MenuItem.findByIdAndUpdate(menuItemId, { $inc: { stockQty: quantity } });
+    await MenuItem.findByIdAndUpdate(menuItemId, {
+      $inc: { stockQty: quantity },
+    });
   }
 }
 
 /**
- * Get payment status
  * GET /api/payments/:paymentId
+ * Used by frontend to poll payment status
  */
 async function getPaymentStatus(req, res) {
   try {
@@ -547,6 +588,8 @@ async function getPaymentStatus(req, res) {
       amount: payment.amount,
       orderId: payment.orderId?._id || null,
       pin: payment.pin || null,
+      mpesaReceiptNumber: payment.mpesaReceiptNumber || null,
+      failureReason: payment.failureReason || null,
     });
   } catch (err) {
     return res.status(500).json({ error: "Failed to get payment status" });
