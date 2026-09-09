@@ -8,66 +8,83 @@ const paymentSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+
+    // Daraja identifiers (needed for reliable callback matching)
+    checkoutRequestID: {
+      type: String,
+      sparse: true,
+      index: true,
+    },
+    merchantRequestID: {
+      type: String,
+      sparse: true,
+    },
+
     tableNumber: {
       type: Number,
       required: true,
     },
+
     paymentMethod: {
       type: String,
       enum: ["mpesa", "card"],
       required: true,
     },
-    // M-Pesa: phone number
+
+    // M-Pesa
     phone: {
       type: String,
       sparse: true,
     },
-    // Card: email address
+
+    // Card
     email: {
       type: String,
       sparse: true,
       lowercase: true,
       trim: true,
     },
+
     amount: {
       type: Number,
       required: true,
       min: 0,
     },
+
     status: {
       type: String,
       enum: ["pending", "completed", "failed"],
       default: "pending",
       index: true,
     },
-    // Items ordered (stored for reference)
+
     items: [
       {
         menuItemId: mongoose.Schema.Types.ObjectId,
         quantity: Number,
       },
     ],
+
     category: {
       type: String,
       enum: ["food", "drink"],
     },
-    // Transaction ID from payment provider
+
+    // Provider transaction IDs
     transactionId: String,
-    
-    // Full transaction data from provider
+    mpesaReceiptNumber: String,
+
+    // Full raw response from provider (useful for debugging)
     transactionData: mongoose.Schema.Types.Mixed,
-    
-    // Reason for failure if applicable
+
     failureReason: String,
-    
-    // Order created from this payment
+
     orderId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
       sparse: true,
     },
-    
-    // PIN generated for this order
+
     pin: {
       type: String,
       sparse: true,
@@ -77,5 +94,8 @@ const paymentSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Helpful compound index for lookups
+paymentSchema.index({ status: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Payment", paymentSchema);
