@@ -8,6 +8,14 @@ const { getIO } = require("../config/socket");
 const { emitStockUpdate } = require("../utils/stockEvents");
 const axios = require("axios");
 
+// Determine if using sandbox or live
+const USE_SANDBOX = process.env.DARAJA_MODE === "sandbox" || process.env.NODE_ENV !== "production";
+const DARAJA_BASE_URL = USE_SANDBOX
+  ? "https://sandbox.safaricom.co.ke"
+  : "https://api.safaricom.co.ke";
+
+console.log(`[daraja] Mode: ${USE_SANDBOX ? "SANDBOX" : "LIVE"} - ${DARAJA_BASE_URL}`);
+
 /**
  * POST /api/payments/initiate
  * Initiates payment via Daraja (M-Pesa) or Paystack (Card)
@@ -67,7 +75,7 @@ async function initiatePayment(req, res) {
 
 /**
  * M-Pesa Payment via Daraja API
- * Supports both Till Number and PayBill
+ * Supports both Sandbox and Live modes
  */
 async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amount, category, table }) {
   try {
@@ -76,7 +84,7 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
     const consumerSecret = process.env.DARAJA_CONSUMER_SECRET;
     const passKey = process.env.DARAJA_PASS_KEY;
     const shortCode = process.env.DARAJA_BUSINESS_CODE || process.env.DARAJA_SHORTCODE;
-    const tillNumber = process.env.DARAJA_TILL_NUMBER; // Optional: if present, use till mode
+    const tillNumber = process.env.DARAJA_TILL_NUMBER;
     const callbackUrl = process.env.DARAJA_CALLBACK_URL;
 
     if (!consumerKey || !consumerSecret || !shortCode) {
@@ -85,16 +93,26 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
 
     // Step 1: Get Daraja access token
     const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
+    
+    console.log(`[daraja] Getting access token from: ${DARAJA_BASE_URL}/oauth/v1/generate`);
+    
     const tokenResponse = await axios.get(
-      "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+      `${DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
       {
         headers: {
           Authorization: `Basic ${auth}`,
         },
+        timeout: 10000,
       }
     );
 
     const accessToken = tokenResponse.data.access_token;
+
+    if (!accessToken) {
+      throw new Error("No access token received from Daraja");
+    }
+
+    console.log("[daraja] ✓ Access token obtained successfully");
 
     // Step 2: Create payment record in database (order NOT created yet)
     const reference = `MPESA-${tableNumber}-${Date.now()}`;
@@ -126,7 +144,7 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
     const partyB = usesTillNumber ? tillNumber : shortCode;
 
     console.log(
-      `[daraja] Initiating ${usesTillNumber ? "Till Number" : "PayBill"} payment:`,
+      `[daraja] Initiating ${usesTillNumber ? "Till Number" : "PayBill"} payment (${USE_SANDBOX ? "SANDBOX" : "LIVE"}):`,
       {
         phone: formattedPhone,
         amount: Math.floor(amount),
@@ -136,8 +154,12 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
     );
 
     // Step 4: Initiate STK push to phone
+    const stkPushUrl = `${DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`;
+    
+    console.log(`[daraja] Sending to: ${stkPushUrl}`);
+
     const darajaResponse = await axios.post(
-      "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+      stkPushUrl,
       {
         BusinessShortCode: shortCode,
         Password: password,
@@ -145,7 +167,7 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
         TransactionType: transactionType,
         Amount: Math.floor(amount),
         PartyA: formattedPhone,
-        PartyB: partyB, // Till number or short code
+        PartyB: partyB,
         PhoneNumber: formattedPhone,
         CallBackURL: callbackUrl,
         AccountReference: `Table-${tableNumber}`,
@@ -155,20 +177,22 @@ async function initiateDarajaPayment(req, res, { tableNumber, items, phone, amou
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
+        timeout: 15000,
       }
     );
 
-    console.log("[daraja] STK push initiated for phone:", formattedPhone);
+    console.log("[daraja] ✓ STK push initiated successfully");
 
     return res.json({
       success: true,
       paymentId: payment._id,
       message: "Enter your M-Pesa PIN on your phone to complete payment",
       transactionType: usesTillNumber ? "till" : "paybill",
+      mode: USE_SANDBOX ? "sandbox" : "live",
     });
   } catch (err) {
     console.error("[daraja] Error:", err.response?.data || err.message);
-    return res.status(500).json({ error: "Failed to initiate M-Pesa payment" });
+    return res.status(500).json({ error: err.response?.data?.errorMessage || "Failed to initiate M-Pesa payment" });
   }
 }
 
@@ -231,6 +255,7 @@ async function initiatePaystackPayment(req, res, { tableNumber, items, email, am
         headers: {
           Authorization: `Bearer ${paystackKey}`,
         },
+        timeout: 10000,
       }
     );
 
@@ -323,6 +348,7 @@ async function paystackCallback(req, res) {
         headers: {
           Authorization: `Bearer ${paystackKey}`,
         },
+        timeout: 10000,
       }
     );
 
