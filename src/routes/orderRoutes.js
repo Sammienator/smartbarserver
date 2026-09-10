@@ -4,19 +4,13 @@ const asyncHandler = require("../utils/asyncHandler");
 const {
   createOrder,
   getWaiterOrders,
+  endOrder,
   updateOrderStatus,
 } = require("../controllers/orderController");
 
-// Legacy direct create (no payment) — useful for testing
 router.post("/", asyncHandler(createOrder));
-
-// Get orders assigned to a waiter
-// GET /api/orders/waiter/:waiterId
-// optional query: ?status=active
 router.get("/waiter/:waiterId", asyncHandler(getWaiterOrders));
-
-// Update order status
-// PATCH /api/orders/:orderId/status  body: { status: "active"|"completed"|"cancelled" }
+router.post("/:orderId/end", asyncHandler(endOrder));
 router.patch("/:orderId/status", asyncHandler(updateOrderStatus));
 
 module.exports = router;
