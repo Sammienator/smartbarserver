@@ -3,18 +3,17 @@ const router = express.Router();
 const asyncHandler = require("../utils/asyncHandler");
 const {
   createOrder,
-  createPaidOrder,
-  endOrder,
-  getActiveOrdersForWaiter,
+  getWaiterOrders,
+  updateOrderStatus,
 } = require("../controllers/orderController");
-
-// Payment-first entry point (preferred)
-router.post("/pay", asyncHandler(createPaidOrder));
 
 // Legacy direct create (no payment) — useful for testing
 router.post("/", asyncHandler(createOrder));
 
-router.post("/:orderId/end", asyncHandler(endOrder));
-router.get("/waiter/:waiterId", asyncHandler(getActiveOrdersForWaiter));
+// Get orders assigned to a waiter
+router.get("/waiter/:waiterId", asyncHandler(getWaiterOrders));
+
+// Update order status (e.g. complete / cancel)
+router.patch("/:orderId/status", asyncHandler(updateOrderStatus));
 
 module.exports = router;
