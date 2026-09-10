@@ -29,33 +29,37 @@ async function createOrder(req, res) {
 
   // Validate required payment fields
   if (!email || !paymentMethod) {
-    return res.status(400).json({ 
-      error: "Email and payment method are required to place an order" 
+    return res.status(400).json({
+      error: "Email and payment method are required to place an order",
     });
   }
 
   // Validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
-    return res.status(400).json({ 
-      error: "Please provide a valid email address" 
+    return res.status(400).json({
+      error: "Please provide a valid email address",
     });
   }
 
   // Validate payment method
   if (!["mpesa", "card"].includes(paymentMethod)) {
-    return res.status(400).json({ 
-      error: "Payment method must be 'mpesa' or 'card'" 
+    return res.status(400).json({
+      error: "Payment method must be 'mpesa' or 'card'",
     });
   }
 
   if (!tableNumber || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: "tableNumber and a non-empty items array are required" });
+    return res
+      .status(400)
+      .json({ error: "tableNumber and a non-empty items array are required" });
   }
 
   const table = await Table.findOne({ tableNumber, isActive: true });
   if (!table) {
-    return res.status(404).json({ error: `No active table found with number ${tableNumber}` });
+    return res
+      .status(404)
+      .json({ error: `No active table found with number ${tableNumber}` });
   }
 
   // 1. Attempt to decrement stock for every item, tracking what succeeded
@@ -67,7 +71,9 @@ async function createOrder(req, res) {
   try {
     for (const { menuItemId, quantity } of items) {
       if (!menuItemId || !quantity || quantity < 1) {
-        throw new Error("Each item requires a valid menuItemId and quantity >= 1");
+        throw new Error(
+          "Each item requires a valid menuItemId and quantity >= 1"
+        );
       }
 
       const updated = await MenuItem.findOneAndUpdate(
@@ -115,7 +121,11 @@ async function createOrder(req, res) {
   const waiter = await assignWaiter({ zone: table.zone });
   if (!waiter) {
     await rollbackStock(decremented);
-    return res.status(503).json({ error: "No waiters are currently available. Please try again shortly." });
+    return res
+      .status(503)
+      .json({
+        error: "No waiters are currently available. Please try again shortly.",
+      });
   }
 
   // 3. Generate PIN and create the order with email and payment method.
@@ -171,7 +181,9 @@ const CATEGORY_TO_STATION = { food: "kitchen", drink: "bar" };
 function notifyStations(order) {
   const io = getIO();
   for (const station of new Set(Object.values(CATEGORY_TO_STATION))) {
-    const category = Object.keys(CATEGORY_TO_STATION).find((c) => CATEGORY_TO_STATION[c] === station);
+    const category = Object.keys(CATEGORY_TO_STATION).find(
+      (c) => CATEGORY_TO_STATION[c] === station
+    );
     const stationItems = order.items.filter((i) => i.category === category);
     if (stationItems.length === 0) continue;
 
@@ -193,22 +205,85 @@ function notifyStations(order) {
 // first pass but whose order couldn't be completed (e.g. waiter unavailable).
 async function rollbackStock(items) {
   for (const { menuItemId, quantity } of items) {
-    await MenuItem.findByIdAndUpdate(menuItemId, { $inc: { stockQty: quantity } });
+    await MenuItem.findByIdAndUpdate(menuItemId, {
+      $inc: { stockQty: quantity },
+    });
   }
 }
 
-// Fetches all orders for a waiter, with optional filters.
+/**
+ * GET /api/orders/waiter/:waiterId
+ * Optional query: ?status=active
+ */
 async function getWaiterOrders(req, res) {
   const { waiterId } = req.params;
   const status = req.query.status; // "active", "completed", etc.
 
+  if (!waiterId || !/^[0-9a-fA-F]{24}$/.test(waiterId)) {
+    return res.status(400).json({ error: "Invalid waiter id" });
+  }
+
   const query = { assignedWaiter: waiterId };
   if (status) query.status = status;
 
-  const orders = await Order.find(query).sort({ createdAt: -1 }).populate("table");
+  const orders = await Order.find(query)
+    .sort({ createdAt: -1 })
+    .populate("table")
+    .populate("assignedWaiter", "name zone");
+
   return res.json(orders);
 }
 
+/**
+ * POST /api/orders/:orderId/end
+ * body: { pin: "1234" }
+ * Waiter enters the guest PIN to complete the order.
+ */
+async function endOrder(req, res) {
+  const { orderId } = req.params;
+  const { pin } = req.body;
+
+  if (!pin || !/^\d{4}$/.test(String(pin))) {
+    return res.status(400).json({ error: "A valid 4-digit PIN is required" });
+  }
+
+  const order = await Order.findById(orderId);
+  if (!order) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  if (order.status !== "active") {
+    return res.status(400).json({ error: `Order is already ${order.status}` });
+  }
+
+  if (String(order.pin) !== String(pin)) {
+    return res.status(400).json({ error: "Incorrect PIN" });
+  }
+
+  order.status = "completed";
+  await order.save({ validateModifiedOnly: true });
+
+  try {
+    const io = getIO();
+    io.to(`order:${orderId}`).emit("order:statusUpdate", {
+      orderId: order._id,
+      status: "completed",
+    });
+  } catch (_) {
+    // socket optional
+  }
+
+  return res.json({
+    success: true,
+    orderId: order._id,
+    status: "completed",
+  });
+}
+
+/**
+ * PATCH /api/orders/:orderId/status
+ * body: { status: "active" | "completed" | "cancelled" }
+ */
 async function updateOrderStatus(req, res) {
   const { orderId } = req.params;
   const { status } = req.body;
@@ -217,14 +292,15 @@ async function updateOrderStatus(req, res) {
     return res.status(400).json({ error: "Invalid status" });
   }
 
-  const order = await Order.findByIdAndUpdate(orderId, { status }, { new: true });
+  const order = await Order.findByIdAndUpdate(
+    orderId,
+    { status },
+    { new: true }
+  );
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
   }
 
-  // Notify the guest (via Socket.io room, not order PIN, so a random person
-  // with the room name can't extract guest data). The guest subscribes to
-  // this room so they can see when their order is completed.
   const io = getIO();
   io.to(`order:${orderId}`).emit("order:statusUpdate", {
     orderId: order._id,
@@ -237,5 +313,6 @@ async function updateOrderStatus(req, res) {
 module.exports = {
   createOrder,
   getWaiterOrders,
+  endOrder,
   updateOrderStatus,
 };
